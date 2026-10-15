@@ -33,8 +33,14 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
-  Menu,
 } from "lucide-react";
+
+// Production API Base URL (Live Render Backend URL)
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL ||
+  (typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
+    ? "http://127.0.0.1:8000"
+    : "https://flood-evacuation-planning-system.onrender.com");
 
 // Ground disaster survey database
 const GROUND_LOCATIONS = [
@@ -269,15 +275,14 @@ export default function Dashboard() {
   const layersGroupRef = useRef(null);
   const userClickMarkerRef = useRef(null);
 
-  // Screen size detection for responsive mobile layout
-  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+  // Responsive device state
+  const [isMobile, setIsMobile] = useState(typeof window !== "undefined" && window.innerWidth < 768);
 
   useEffect(() => {
     const handleResize = () => {
       const mobile = window.innerWidth < 768;
       setIsMobile(mobile);
       if (mobile) {
-        // Auto-fold panels on initial small screen load to let map breathe
         setIsLeftPanelOpen(false);
       }
     };
@@ -285,7 +290,7 @@ export default function Dashboard() {
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
-  // Today's date limit (strictly capped at current date)
+  // Today's date restriction (capped so it cannot query future dates)
   const todayStr = new Date().toISOString().slice(0, 10);
   const [selectedDate, setSelectedDate] = useState("2026-08-26");
   const [currentTimeDisplay, setCurrentTimeDisplay] = useState("");
@@ -299,11 +304,11 @@ export default function Dashboard() {
 
   const isEventDate = selectedDate === "2026-08-26";
 
-  // Collapsible panel states
-  const [isLeftPanelOpen, setIsLeftPanelOpen] = useState(window.innerWidth >= 768);
+  // Collapsible panels
+  const [isLeftPanelOpen, setIsLeftPanelOpen] = useState(typeof window !== "undefined" && window.innerWidth >= 768);
   const [isRightPanelOpen, setIsRightPanelOpen] = useState(true);
 
-  // UI modes & overlays
+  // UI state
   const [mapMode, setMapMode] = useState("satellite");
   const [activeTab, setActiveTab] = useState("summary");
   const [showSentinel1, setShowSentinel1] = useState(true);
@@ -319,7 +324,7 @@ export default function Dashboard() {
   const [sitRepLang, setSitRepLang] = useState("en");
   const [sitRepData, setSitRepData] = useState(null);
 
-  // Baseline summary
+  // Overall statistics fallback
   const [summary, setSummary] = useState({
     flood: { area_km2: 34.8 },
     roads: { flooded_length_km: 42.6, segments_affected: 19 },
@@ -349,49 +354,109 @@ export default function Dashboard() {
     return () => clearInterval(interval);
   }, []);
 
-  // Strict spatial evaluator
+  // DATE-AWARE SPATIAL EVALUATOR
   const evaluateGroundCoordinates = (lat, lng, queryDate) => {
+    const isDisasterWindow = queryDate >= "2026-08-26" && queryDate <= "2026-09-08";
+    const isPreDisaster = queryDate < "2026-08-26";
+
     for (const loc of GROUND_LOCATIONS) {
       const distKm = Math.hypot(lat - loc.coords[0], (lng - loc.coords[1]) * Math.cos((lat * Math.PI) / 180)) * 111.0;
       if (distKm <= (loc.bufferKm || 1.2)) {
-        return {
-          ...loc,
-          name: `${loc.name} (${distKm < 0.2 ? "Direct Site" : `${distKm.toFixed(1)} km margin`})`,
-          queryDate,
-          history: loc.history || [],
-        };
+        if (loc.isFlooded && isDisasterWindow) {
+          return {
+            ...loc,
+            queryDate,
+            name: `${loc.name} (${distKm < 0.2 ? "Direct Site" : `${distKm.toFixed(1)} km margin`})`,
+            alertLevel: loc.alertLevel,
+            isFlooded: true,
+            warning: `ACTIVE DISASTER on ${queryDate}: ${loc.warning}`,
+            history: loc.history || [],
+          };
+        } else if (loc.isFlooded && isPreDisaster) {
+          return {
+            ...loc,
+            queryDate,
+            name: `${loc.name} (Pre-Event Baseline)`,
+            alertLevel: "NORMAL PRE-EVENT",
+            isFlooded: false,
+            cause: `Pre-event baseline on ${queryDate}. River channel stable. Infrastructure and bridges fully intact before the August 26 breach.`,
+            stats: {
+              floodedArea: "0.0 km² (Pre-event)",
+              cutOffTowns: "None (Roads open)",
+              severedRoad: "0.0 km (Bridge intact)",
+              damagedBld: "0 Buildings damaged",
+            },
+            warning: `Normal pre-event conditions on ${queryDate}. No flood or debris flow occurred yet.`,
+            reserves: "Normal local supplies",
+            history: loc.history || [],
+          };
+        } else {
+          return {
+            ...loc,
+            queryDate,
+            history: loc.history || [],
+          };
+        }
       }
     }
 
+    // Trishuli valley floor check
     const expectedRiverLon = 85.18 + (lat - 27.95) * ((85.38 - 85.18) / (28.28 - 27.95));
     const distToRiverKm = Math.abs(lng - expectedRiverLon) * 111.0 * Math.cos((lat * Math.PI) / 180);
 
     if (distToRiverKm <= 1.2 && lat >= 27.93 && lat <= 28.32) {
-      return {
-        name: `Trishuli River Corridor (${lat.toFixed(4)}° N, ${lng.toFixed(4)}° E)`,
-        category: "Valley Riverbed Zone",
-        alertLevel: "HIGH FLOOD HAZARD",
-        isFlooded: true,
-        coords: [lat, lng],
-        eventDateTime: "2026-08-26 09:00 NPT (08:45 IST)",
-        queryDate,
-        cause: `Within ${distToRiverKm.toFixed(1)} km river inundation margin. Satellite radar confirms high water runoff on ${queryDate}.`,
-        population: "Dispersed riparian settlements",
-        reserves: "< 48 hrs (Surge buffer)",
-        elevation: `${Math.round(700 + (lat - 27.95) * 3200)} m (DEM)`,
-        evacHub: "Nearest Ridge Staging Point",
-        riskFactor: "Active water current, mudflow deposition, and bank erosion",
-        stats: {
-          floodedArea: `${(0.8 + (lat - 27.9) * 1.8).toFixed(1)} km² sector`,
-          cutOffTowns: "Valley access route threatened",
-          severedRoad: `${(1.2 + (lat - 27.9) * 2.2).toFixed(1)} km road impacted`,
-          damagedBld: `${Math.round(15 + (lat - 27.9) * 45)} structures at risk`,
-        },
-        warning: `Sector lies in direct river surge path on ${queryDate}. Rescuers should proceed with caution regarding unstable valley embankments.`,
-        history: [],
-      };
+      if (isDisasterWindow) {
+        return {
+          name: `Trishuli Flood Corridor (${lat.toFixed(4)}° N, ${lng.toFixed(4)}° E)`,
+          category: "Valley Riverbed Inundation",
+          alertLevel: "CRITICAL FLOOD SURGE",
+          isFlooded: true,
+          coords: [lat, lng],
+          eventDateTime: "2026-08-26 09:00 NPT (08:45 IST)",
+          queryDate,
+          cause: `Active disaster surge on ${queryDate}. Radar backscatter drop confirms 845 m³/s river surge and active mudflow deposition.`,
+          population: "Dispersed riparian settlements",
+          reserves: "< 24 hrs (Surge buffer)",
+          elevation: `${Math.round(700 + (lat - 27.95) * 3200)} m (DEM)`,
+          evacHub: "Nearest Ridge Staging Point",
+          riskFactor: "Active water torrent, boulder bedload, and bank collapse",
+          stats: {
+            floodedArea: `${(1.2 + (lat - 27.9) * 2.2).toFixed(1)} km² sector`,
+            cutOffTowns: "Valley highway severed",
+            severedRoad: `${(2.4 + (lat - 27.9) * 2.5).toFixed(1)} km road impacted`,
+            damagedBld: `${Math.round(25 + (lat - 27.9) * 55)} structures at risk`,
+          },
+          warning: `CATASTROPHIC FLOOD ACTIVE on ${queryDate}: Embankments breached and highway severed. Immediate evacuation advised.`,
+          history: [],
+        };
+      } else {
+        return {
+          name: `Trishuli River Corridor (${lat.toFixed(4)}° N, ${lng.toFixed(4)}° E)`,
+          category: "Valley Riverbed Zone",
+          alertLevel: "NORMAL BASEFLOW",
+          isFlooded: false,
+          coords: [lat, lng],
+          eventDateTime: "Normal seasonal baseline",
+          queryDate,
+          cause: `Normal baseline streamflow on ${queryDate}. River flow measured at 42.5 m³/s within seasonal banks.`,
+          population: "Riparian settlements",
+          reserves: "Normal local conditions",
+          elevation: `${Math.round(700 + (lat - 27.95) * 3200)} m (DEM)`,
+          evacHub: "Local Access Trail",
+          riskFactor: "None. River stage within seasonal non-disaster threshold.",
+          stats: {
+            floodedArea: "0.0 km² (Normal flow)",
+            cutOffTowns: "None (Roads open)",
+            severedRoad: "0.0 km (No breach)",
+            damagedBld: "0 Buildings damaged",
+          },
+          warning: `No flood recorded for ${queryDate}. River flow is at safe seasonal baseflow levels.`,
+          history: [],
+        };
+      }
     }
 
+    // Highland location
     return {
       name: `Ground Location (${lat.toFixed(4)}° N, ${lng.toFixed(4)}° E)`,
       category: "Unaffected Highland Area",
@@ -400,7 +465,7 @@ export default function Dashboard() {
       coords: [lat, lng],
       eventDateTime: "Normal seasonal baseline",
       queryDate,
-      cause: `Located outside maximum flood and debris margins on ${queryDate}. Ground is stable.`,
+      cause: `Located high above the valley floor on ${queryDate}. Ground is stable and completely unaffected by floodwaters.`,
       population: "Local highland area",
       reserves: "Normal local conditions",
       elevation: `${Math.round(1400 + Math.abs(lat) * 20)} m (DEM)`,
@@ -412,12 +477,12 @@ export default function Dashboard() {
         severedRoad: "0.0 km (No flood break)",
         damagedBld: "0 Buildings damaged",
       },
-      warning: `No flood impact recorded for ${queryDate}. Terrain is stable and free from water accumulation.`,
+      warning: `Location is safe on ${queryDate}. No flood or debris impact recorded.`,
       history: [],
     };
   };
 
-  // Autocomplete Geocoding
+  // Autocomplete search across all places globally
   useEffect(() => {
     const q = searchQuery.trim();
     if (!q || q.length < 2) {
@@ -474,13 +539,13 @@ export default function Dashboard() {
     return () => clearTimeout(delayDebounce);
   }, [searchQuery, selectedDate]);
 
-  // Query backend for specific date
+  // Query backend API
   const queryLocationForDate = async (lat, lng, dateStr) => {
     const evaluated = evaluateGroundCoordinates(lat, lng, dateStr);
     setSelectedLocation(evaluated);
 
     try {
-      const res = await fetch(`http://127.0.0.1:8000/api/global-water-body?lat=${lat}&lon=${lng}&date=${dateStr}`);
+      const res = await fetch(`${API_BASE_URL}/api/global-water-body?lat=${lat}&lon=${lng}&date=${dateStr}`);
       if (res.ok) {
         const live = await res.json();
         const flow = live.metrics.current_flow;
@@ -544,7 +609,7 @@ export default function Dashboard() {
     handleDateChange(dateStr);
   };
 
-  // 1. INITIALIZE LEAFLET MAP ONCE
+  // 1. INITIALIZE LEAFLET MAP ONCE (Never unmount on date change)
   useEffect(() => {
     if (!mapContainerRef.current) return;
     if (mapInstanceRef.current) return;
@@ -588,7 +653,7 @@ export default function Dashboard() {
 
       queryLocationForDate(lat, lng, selectedDate);
       if (isMobile) {
-        setIsRightPanelOpen(true); // Open panel on mobile so user sees the clicked metrics
+        setIsRightPanelOpen(true);
       }
     });
 
@@ -645,7 +710,6 @@ export default function Dashboard() {
     setTimeout(() => map.invalidateSize(), 100);
   }, [mapMode]);
 
-  // Re-measure map container whenever panels collapse/expand
   useEffect(() => {
     const timer = setTimeout(() => {
       if (mapInstanceRef.current) {
@@ -658,16 +722,16 @@ export default function Dashboard() {
   // Fetch backend data
   const fetchBackendData = async () => {
     try {
-      const resSum = await fetch("http://127.0.0.1:8000/api/damage-summary");
+      const resSum = await fetch(`${API_BASE_URL}/api/damage-summary`);
       if (resSum.ok) setSummary(await resSum.json());
 
-      const resFlood = await fetch("http://127.0.0.1:8000/api/geojson/flood");
+      const resFlood = await fetch(`${API_BASE_URL}/api/geojson/flood`);
       if (resFlood.ok) setFloodGeoJson(await resFlood.json());
 
-      const resRoads = await fetch("http://127.0.0.1:8000/api/geojson/roads");
+      const resRoads = await fetch(`${API_BASE_URL}/api/geojson/roads`);
       if (resRoads.ok) setRoadsGeoJson(await resRoads.json());
 
-      const resBld = await fetch("http://127.0.0.1:8000/api/geojson/buildings");
+      const resBld = await fetch(`${API_BASE_URL}/api/geojson/buildings`);
       if (resBld.ok) setBuildingsGeoJson(await resBld.json());
     } catch {
       console.log("Backend offline, using standard baseline.");
@@ -810,7 +874,7 @@ export default function Dashboard() {
   const triggerPipeline = async () => {
     setIsRunningPipeline(true);
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/run-pipeline", { method: "POST" });
+      const res = await fetch(`${API_BASE_URL}/api/run-pipeline`, { method: "POST" });
       const data = await res.json();
       alert("✅ " + data.message);
       fetchBackendData();
@@ -871,7 +935,7 @@ export default function Dashboard() {
         className="absolute inset-0 h-full w-full z-0 bg-[#111317]"
       />
 
-      {/* 2. LEFT COLUMN: SEARCH + GROUND SURVEY SITES (RESPONSIVE) */}
+      {/* 2. LEFT COLUMN: SEARCH + GROUND SURVEY SITES */}
       {isLeftPanelOpen ? (
         <div
           className={`absolute z-[1000] flex flex-col gap-2.5 transition-all duration-300 ${
@@ -909,7 +973,7 @@ export default function Dashboard() {
             <button
               onClick={() => setIsLeftPanelOpen(false)}
               className="p-2.5 rounded-lg bg-[#16181d]/95 hover:bg-slate-800 border border-slate-700/80 text-slate-400 hover:text-white transition shadow-xl shrink-0"
-              title="Fold Panel"
+              title="Fold Left Panel for Full View"
             >
               <PanelLeftClose className="w-4 h-4" />
             </button>
@@ -1071,7 +1135,7 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* Map Mode & Overlays row */}
+          {/* Map Mode & Overlays */}
           <div className="flex gap-2">
             <div className="flex-1 bg-[#16181d]/95 backdrop-blur-md border border-slate-700/80 p-2 rounded-lg shadow-xl flex items-center justify-between">
               <div className="flex gap-1 w-full justify-between">
@@ -1132,12 +1196,24 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
-      ) : null}
+      ) : (
+        /* FOLDED LEFT CHIP */
+        <button
+          onClick={() => setIsLeftPanelOpen(true)}
+          style={{ position: "absolute", top: 20, left: 20, zIndex: 1000 }}
+          className="flex items-center gap-2 bg-[#16181d]/95 hover:bg-slate-800 border border-slate-700 px-3 py-2 rounded-lg text-white text-xs font-semibold shadow-2xl transition"
+          title="Unfold Controls & Survey Sites"
+        >
+          <PanelLeftOpen className="w-4 h-4 text-cyan-400" />
+          <span>Open Controls</span>
+        </button>
+      )}
 
-      {/* 3. RIGHT COLUMN: CONTROL & INFO PANEL (RESPONSIVE) */}
+      {/* 3. RIGHT COLUMN: CONTROL & INFO PANEL */}
       {isRightPanelOpen ? (
         <div
-          className={`absolute z-[1000] backdrop-blur-md rounded-xl shadow-2xl flex flex-col overflow-hidden transition-all duration-300 border ${panelThemeClass} ${
+          style={{ position: "absolute", top: 20, right: 20, zIndex: 1000, width: 440 }}
+          className={`backdrop-blur-md rounded-xl shadow-2xl flex flex-col max-h-[94vh] overflow-hidden transition-all duration-300 border ${panelThemeClass} ${
             isMobile
               ? "bottom-14 left-3 right-3 max-h-[68vh]"
               : "top-5 right-5 w-[440px] max-h-[94vh]"
@@ -1148,8 +1224,8 @@ export default function Dashboard() {
             <div className="flex items-center gap-2 overflow-hidden pr-1">
               <button
                 onClick={() => setIsRightPanelOpen(false)}
-                className="p-1 rounded-md hover:bg-black/20 text-slate-400 hover:text-white transition shrink-0"
-                title="Fold Panel"
+                className="p-1.5 rounded-md hover:bg-black/20 text-slate-400 hover:text-white transition shrink-0"
+                title="Fold Panel for Full Map View"
               >
                 {isMobile ? <X className="w-4 h-4" /> : <PanelRightClose className="w-4 h-4" />}
               </button>
@@ -1186,7 +1262,7 @@ export default function Dashboard() {
                   isCritical ? "bg-rose-700 hover:bg-rose-600 shadow-rose-950" : "bg-emerald-600 hover:bg-emerald-500"
                 }`}
               >
-                <FileDown className="w-3 h-3" />
+                <FileDown className="w-3.5 h-3.5" />
                 SitRep
               </button>
             </div>
@@ -1216,7 +1292,7 @@ export default function Dashboard() {
             </button>
             <button
               onClick={() => setActiveTab("sites")}
-              className={`py-1.5 px-1 text-center rounded text-[11px] font-semibold uppercase tracking-wider transition truncate ${
+              className={`py-1.5 px-1 text-center rounded text-[11px] font-semibold uppercase tracking-wider transition text-ellipsis overflow-hidden whitespace-nowrap ${
                 activeTab === "sites"
                   ? isCritical ? "bg-rose-600 text-white shadow-md" : isHighRisk ? "bg-amber-600 text-white" : "bg-slate-700 text-white"
                   : "text-slate-400 hover:bg-slate-800/50"
@@ -1522,9 +1598,24 @@ export default function Dashboard() {
             <div>Copernicus Sentinel data 2026. WorldDEM-30. &copy; OpenStreetMap contributors.</div>
           </div>
         </div>
-      ) : null}
+      ) : (
+        /* FOLDED RIGHT CHIP */
+        <button
+          onClick={() => setIsRightPanelOpen(true)}
+          style={{ position: "absolute", top: 20, right: 20, zIndex: 1000 }}
+          className={`flex items-center gap-2 border px-3 py-2 rounded-lg text-xs font-semibold shadow-2xl transition ${
+            isCritical
+              ? "bg-[#250d14]/95 border-rose-600 text-rose-200 hover:bg-rose-900"
+              : "bg-[#16181d]/95 hover:bg-slate-800 border-slate-700 text-white"
+          }`}
+          title="Unfold Control & Info Panel"
+        >
+          <PanelRightOpen className={`w-4 h-4 ${isCritical ? "text-rose-400" : "text-cyan-400"}`} />
+          <span>Open Control Panel</span>
+        </button>
+      )}
 
-      {/* 4. MOBILE BOTTOM ACTION DOCK (Visible on mobile screens) */}
+      {/* 4. MOBILE BOTTOM ACTION DOCK */}
       {isMobile && (
         <div className="absolute bottom-2 left-3 right-3 z-[1001] bg-[#16181d]/95 backdrop-blur-md border border-slate-700/80 rounded-xl p-1.5 flex justify-around items-center shadow-2xl">
           <button
